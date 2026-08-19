@@ -15,7 +15,8 @@ The module provides:
   `Release()`;
 - isolated counters by namespace and bucket;
 - an in-process memory store;
-- a distributed Valkey store using a caller-owned client.
+- a distributed Valkey store using a caller-owned client;
+- opt-in `net/http` rate-limit middleware in `go.acim.net/quota/ratelimit`.
 
 ## Install
 
@@ -85,6 +86,77 @@ if err := reservation.Commit(ctx, actualCost); err != nil {
 idempotent within the current process when finalized repeatedly with the same
 result.
 
+## HTTP middleware
+
+The optional `ratelimit` package adapts a limiter to ordinary `net/http`
+handlers. The application supplies the complete quota request, so identity,
+authentication, proxy trust, and route policy remain application-owned:
+
+```go
+chatLimit, err := ratelimit.Middleware(limiter, func(req *http.Request) (quota.Request, error) {
+	return quota.Request{
+		Namespace: "vega:http:chat",
+		Bucket:    "authenticated-api",
+		Amount:    1,
+		Rule: quota.Rule{
+			Capacity: cfg.RateLimit.Chat.Capacity,
+			Window:   cfg.RateLimit.Chat.Window,
+		},
+	}, nil
+})
+if err != nil {
+	return err
+}
+
+mux.Handle("POST /chats", chatLimit(http.HandlerFunc(vega.Chat)))
+```
+
+Allowed requests continue to the wrapped handler. Rejected requests default to
+`429 Too Many Requests` with `Retry-After` set to the whole number of seconds
+until the quota window resets, rounded up. Request-mapping and quota-store
+errors default to a fail-closed `503 Service Unavailable` response.
+
+Use `ratelimit.WithRejectionHandler` to customize rejected responses and
+`ratelimit.WithErrorHandler` to log errors, write a custom response, or return
+`true` to fail open. The middleware passes the incoming request context to the
+limiter and does not select a caller identity automatically.
+
+### Client-IP buckets
+
+For public endpoints without an authenticated identity, the package provides
+an opt-in client-IP resolver. Forwarding headers are ignored by default. When
+trusted proxy CIDRs are configured, the resolver accepts `X-Forwarded-For`
+only from an immediate peer inside those ranges and walks the chain from right
+to left:
+
+```go
+clientIPs, err := ratelimit.NewClientIPResolver(cfg.TrustedProxyCIDRs...)
+if err != nil {
+	return err
+}
+
+publicChatLimit, err := ratelimit.Middleware(limiter, func(req *http.Request) (quota.Request, error) {
+	ip, err := clientIPs.Resolve(req)
+	if err != nil {
+		return quota.Request{}, err
+	}
+	return quota.Request{
+		Namespace: "vega:http:public-chat",
+		Bucket:    "ip:" + ip.String(),
+		Amount:    1,
+		Rule: quota.Rule{
+			Capacity: cfg.RateLimit.PublicChat.Capacity,
+			Window:   cfg.RateLimit.PublicChat.Window,
+		},
+	}, nil
+})
+```
+
+With no configured proxy ranges, `Resolve` uses the normalized address from
+`Request.RemoteAddr` and ignores caller-supplied forwarding headers. Proxy
+ranges are deployment configuration and should match the actual ingress or
+load-balancer network.
+
 ## Valkey
 
 The Valkey store does not own the client, so applications retain control over
@@ -118,9 +190,9 @@ limiter, err := quota.New(store)
 - The memory store is local to one process. Use Valkey when multiple processes
   must share counters.
 
-The library deliberately does not include HTTP middleware, identity extraction,
-status-code policy, provider concurrency limits, or application-specific rule
-names.
+The root package deliberately does not include HTTP dependencies, identity
+extraction, status-code policy, provider concurrency limits, or
+application-specific rule names.
 
 ## Development
 
