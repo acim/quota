@@ -6,6 +6,7 @@ package ratelimit
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"reflect"
@@ -15,6 +16,11 @@ import (
 	"go.acim.net/quota"
 )
 
+// ErrSkip tells middleware that the current request is not subject to its
+// policy. The downstream handler continues without calling the consumer or the
+// configured error handler.
+var ErrSkip = errors.New("skip rate limit")
+
 // Consumer admits quota requests. *quota.Limiter satisfies Consumer.
 type Consumer interface {
 	Consume(context.Context, quota.Request) (quota.Decision, error)
@@ -22,9 +28,21 @@ type Consumer interface {
 
 var _ Consumer = (*quota.Limiter)(nil)
 
+// BatchConsumer atomically admits multiple quota requests. *quota.Limiter
+// satisfies BatchConsumer when its store implements quota.BatchStore.
+type BatchConsumer interface {
+	ConsumeBatch(context.Context, []quota.Request) (quota.BatchDecision, error)
+}
+
+var _ BatchConsumer = (*quota.Limiter)(nil)
+
 // RequestFunc maps an HTTP request to the complete quota request that should
 // be consumed. Applications use it to choose identity and quota policy.
 type RequestFunc func(*http.Request) (quota.Request, error)
+
+// BatchRequestFunc maps an HTTP request to quota requests that must be admitted
+// atomically.
+type BatchRequestFunc func(*http.Request) ([]quota.Request, error)
 
 // RejectionHandler writes the response for a rejected quota decision.
 type RejectionHandler func(http.ResponseWriter, *http.Request, quota.Decision)
@@ -89,7 +107,7 @@ func WithErrorHandler(handler ErrorHandler) Option {
 
 // Middleware constructs net/http middleware backed by consumer.
 func Middleware(consumer Consumer, mapRequest RequestFunc, options ...Option) (func(http.Handler) http.Handler, error) {
-	if isNilConsumer(consumer) {
+	if isNilValue(consumer) {
 		return nil, fmt.Errorf("consumer is required")
 	}
 	if mapRequest == nil {
@@ -114,6 +132,10 @@ func Middleware(consumer Consumer, mapRequest RequestFunc, options ...Option) (f
 		return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 			quotaRequest, err := mapRequest(request)
 			if err != nil {
+				if errors.Is(err, ErrSkip) {
+					next.ServeHTTP(writer, request)
+					return
+				}
 				if config.errorHandler(writer, request, fmt.Errorf("map quota request: %w", err)) {
 					next.ServeHTTP(writer, request)
 				}
@@ -132,27 +154,101 @@ func Middleware(consumer Consumer, mapRequest RequestFunc, options ...Option) (f
 				return
 			}
 
-			writer.Header().Set("Retry-After", retryAfter(decision.ResetAt, config.now()))
+			writer.Header().Set("Retry-After", RetryAfter(decision.ResetAt, config.now()))
 			config.rejectionHandler(writer, request, decision)
 		})
 	}, nil
 }
 
-func isNilConsumer(consumer Consumer) bool {
-	if consumer == nil {
+// BatchMiddleware constructs net/http middleware that atomically admits every
+// quota request returned by mapRequest.
+func BatchMiddleware(consumer BatchConsumer, mapRequest BatchRequestFunc, options ...Option) (func(http.Handler) http.Handler, error) {
+	if isNilValue(consumer) {
+		return nil, fmt.Errorf("batch consumer is required")
+	}
+	if mapRequest == nil {
+		return nil, fmt.Errorf("batch request function is required")
+	}
+
+	config := config{
+		now:              time.Now,
+		rejectionHandler: defaultRejectionHandler,
+		errorHandler:     defaultErrorHandler,
+	}
+	for _, option := range options {
+		if option == nil {
+			return nil, fmt.Errorf("option is required")
+		}
+		if err := option.apply(&config); err != nil {
+			return nil, fmt.Errorf("apply option: %w", err)
+		}
+	}
+
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+			quotaRequests, err := mapRequest(request)
+			if err != nil {
+				if errors.Is(err, ErrSkip) {
+					next.ServeHTTP(writer, request)
+					return
+				}
+				if config.errorHandler(writer, request, fmt.Errorf("map quota batch request: %w", err)) {
+					next.ServeHTTP(writer, request)
+				}
+				return
+			}
+
+			decision, err := consumer.ConsumeBatch(request.Context(), quotaRequests)
+			if err != nil {
+				if config.errorHandler(writer, request, fmt.Errorf("consume quota batch: %w", err)) {
+					next.ServeHTTP(writer, request)
+				}
+				return
+			}
+			if decision.Allowed {
+				next.ServeHTTP(writer, request)
+				return
+			}
+
+			blocking := blockingDecision(decision)
+			writer.Header().Set("Retry-After", RetryAfter(decision.RetryAt(), config.now()))
+			config.rejectionHandler(writer, request, blocking)
+		})
+	}, nil
+}
+
+func blockingDecision(batch quota.BatchDecision) quota.Decision {
+	retryAt := batch.RetryAt()
+	for _, decision := range batch.Decisions {
+		if !decision.Allowed && decision.ResetAt.Equal(retryAt) {
+			return decision
+		}
+	}
+	return quota.Decision{Allowed: false, ResetAt: retryAt}
+}
+
+func isNilValue(value any) bool {
+	if value == nil {
 		return true
 	}
-	value := reflect.ValueOf(consumer)
-	switch value.Kind() {
+	reflected := reflect.ValueOf(value)
+	switch reflected.Kind() {
 	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
-		return value.IsNil()
+		return reflected.IsNil()
 	default:
 		return false
 	}
 }
 
-func retryAfter(resetAt, now time.Time) string {
-	remaining := resetAt.Sub(now)
+// RetryAfter returns the whole number of seconds until resetAt, rounded up for
+// use in an HTTP Retry-After header.
+func RetryAfter(resetAt, now time.Time) string {
+	return RetryAfterDuration(resetAt.Sub(now))
+}
+
+// RetryAfterDuration returns a Retry-After value for a known remaining
+// duration.
+func RetryAfterDuration(remaining time.Duration) string {
 	if remaining <= 0 {
 		return "0"
 	}

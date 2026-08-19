@@ -178,6 +178,32 @@ func TestMiddlewareDefaultsToFailClosedForMappingAndConsumerErrors(t *testing.T)
 	}
 }
 
+func TestMiddlewareSkipBypassesAdmissionAndErrorHandling(t *testing.T) {
+	t.Parallel()
+	consumer := consumerFunc(func(context.Context, quota.Request) (quota.Decision, error) {
+		t.Fatal("Consume() called for skipped request")
+		return quota.Decision{}, nil
+	})
+	errorCalls := 0
+	middleware, err := Middleware(consumer, func(*http.Request) (quota.Request, error) {
+		return quota.Request{}, ErrSkip
+	}, WithErrorHandler(func(http.ResponseWriter, *http.Request, error) bool {
+		errorCalls++
+		return false
+	}))
+	if err != nil {
+		t.Fatalf("Middleware() error = %v", err)
+	}
+	called := 0
+	middleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called++ })).ServeHTTP(
+		httptest.NewRecorder(),
+		httptest.NewRequest(http.MethodGet, "/", nil),
+	)
+	if called != 1 || errorCalls != 0 {
+		t.Fatalf("downstream calls = %d, error calls = %d; want 1, 0", called, errorCalls)
+	}
+}
+
 func TestCustomErrorHandlerCanFailOpenExactlyOnce(t *testing.T) {
 	t.Parallel()
 	wantErr := errors.New("store unavailable")
@@ -320,10 +346,93 @@ func TestMiddlewareWithMemoryStore(t *testing.T) {
 	}
 }
 
+func TestBatchMiddlewareRejectsAtomicallyWithLatestBlockingRetry(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 8, 19, 12, 0, 0, 0, time.UTC)
+	wantRequests := []quota.Request{
+		{Namespace: "forms", Bucket: "client", Amount: 1, Rule: quota.Rule{Capacity: 5, Window: time.Minute}},
+		{Namespace: "forms", Bucket: "client", Amount: 1, Rule: quota.Rule{Capacity: 30, Window: time.Hour}},
+	}
+	consumer := batchConsumerFunc(func(_ context.Context, requests []quota.Request) (quota.BatchDecision, error) {
+		if !reflect.DeepEqual(requests, wantRequests) {
+			t.Fatalf("ConsumeBatch() requests = %+v, want %+v", requests, wantRequests)
+		}
+		return quota.BatchDecision{Allowed: false, Decisions: []quota.Decision{
+			{Allowed: false, Requested: 1, Capacity: 5, Used: 5, ResetAt: now.Add(time.Minute)},
+			{Allowed: false, Requested: 1, Capacity: 30, Used: 30, ResetAt: now.Add(time.Hour)},
+		}}, nil
+	})
+	middleware, err := BatchMiddleware(consumer, func(*http.Request) ([]quota.Request, error) {
+		return wantRequests, nil
+	}, WithClock(func() time.Time { return now }))
+	if err != nil {
+		t.Fatalf("BatchMiddleware() error = %v", err)
+	}
+
+	called := 0
+	recorder := httptest.NewRecorder()
+	middleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called++ })).ServeHTTP(
+		recorder,
+		httptest.NewRequest(http.MethodPost, "/forms/123/submissions", nil),
+	)
+	if called != 0 {
+		t.Fatalf("downstream calls = %d, want 0", called)
+	}
+	if recorder.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusTooManyRequests)
+	}
+	if got := recorder.Header().Get("Retry-After"); got != "3600" {
+		t.Fatalf("Retry-After = %q, want %q", got, "3600")
+	}
+}
+
+func TestBatchMiddlewareWithMemoryStore(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 8, 19, 12, 0, 0, 0, time.UTC)
+	limiter, err := quota.New(quota.NewMemoryStore(), quota.WithClock(func() time.Time { return now }))
+	if err != nil {
+		t.Fatalf("quota.New() error = %v", err)
+	}
+	requests := []quota.Request{
+		{Namespace: "forms", Bucket: "client", Amount: 1, Rule: quota.Rule{Capacity: 2, Window: time.Minute}},
+		{Namespace: "forms", Bucket: "client", Amount: 1, Rule: quota.Rule{Capacity: 1, Window: time.Hour}},
+	}
+	middleware, err := BatchMiddleware(limiter, func(*http.Request) ([]quota.Request, error) {
+		return requests, nil
+	}, WithClock(func() time.Time { return now }))
+	if err != nil {
+		t.Fatalf("BatchMiddleware() error = %v", err)
+	}
+	called := 0
+	handler := middleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called++ }))
+
+	for requestNumber, wantStatus := range []int{http.StatusOK, http.StatusTooManyRequests} {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/forms/123/submissions", nil))
+		if recorder.Code != wantStatus {
+			t.Fatalf("request %d status = %d, want %d", requestNumber+1, recorder.Code, wantStatus)
+		}
+	}
+	if called != 1 {
+		t.Fatalf("downstream calls = %d, want 1", called)
+	}
+
+	minute, err := limiter.Consume(context.Background(), requests[0])
+	if err != nil || !minute.Allowed || minute.Used != 2 {
+		t.Fatalf("minute Consume() after rejected batch = %+v, %v; want atomic rollback", minute, err)
+	}
+}
+
 type consumerFunc func(context.Context, quota.Request) (quota.Decision, error)
 
 func (consume consumerFunc) Consume(ctx context.Context, request quota.Request) (quota.Decision, error) {
 	return consume(ctx, request)
+}
+
+type batchConsumerFunc func(context.Context, []quota.Request) (quota.BatchDecision, error)
+
+func (consume batchConsumerFunc) ConsumeBatch(ctx context.Context, requests []quota.Request) (quota.BatchDecision, error) {
+	return consume(ctx, requests)
 }
 
 type nilConsumer struct{}

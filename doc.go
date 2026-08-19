@@ -2,5 +2,7 @@
 //
 // A unit can represent a request, byte, job, recipient, model token, or any
 // other non-negative quantity chosen by the caller. Counters are isolated by
-// namespace and bucket and reset at UTC-aligned window boundaries.
+// namespace and bucket and reset at UTC-aligned window boundaries. ConsumeBatch
+// atomically applies multiple independent rules when the store implements
+// BatchStore.
 package quota

@@ -10,6 +10,7 @@ recipient, model token, image, or another resource.
 The module provides:
 
 - atomic weighted admission without charging rejected amounts;
+- atomic multi-bucket admission across independent rules and windows;
 - reservations when the final amount is not known in advance;
 - partial reconciliation with `Commit(actual)` and full rollback with
   `Release()`;
@@ -49,6 +50,40 @@ if !decision.Allowed {
 	return ErrTooManyRequests
 }
 ```
+
+## Consume multiple buckets atomically
+
+Use `ConsumeBatch` when one operation must satisfy multiple quotas, such as a
+per-minute burst limit and a per-hour sustained limit. Either every counter is
+charged or none is:
+
+```go
+batch, err := limiter.ConsumeBatch(ctx, []quota.Request{
+	{
+		Namespace: "public-form-submissions",
+		Bucket:    "ip:" + clientIP,
+		Amount:    1,
+		Rule:      quota.Rule{Capacity: 5, Window: time.Minute},
+	},
+	{
+		Namespace: "public-form-submissions",
+		Bucket:    "ip:" + clientIP,
+		Amount:    1,
+		Rule:      quota.Rule{Capacity: 30, Window: time.Hour},
+	},
+})
+if err != nil {
+	return err
+}
+if !batch.Allowed {
+	return ErrTooManyRequests
+}
+```
+
+`MemoryStore` and `ValkeyStore` implement `BatchStore`. Custom stores retain
+source compatibility with `Store`, but must implement `BatchStore` before they
+can be used with `ConsumeBatch`. Duplicate counters in one batch are rejected;
+represent the combined amount as one request instead.
 
 ## Reserve an upper bound
 
@@ -111,6 +146,11 @@ if err != nil {
 mux.Handle("POST /chats", chatLimit(http.HandlerFunc(vega.Chat)))
 ```
 
+For endpoints governed by multiple rules, use `ratelimit.BatchMiddleware` and
+return all quota requests from its mapping function. It uses `ConsumeBatch`, so
+a rejected rule never charges another bucket. The middleware sets
+`Retry-After` to the latest reset among the rules blocking the batch.
+
 Allowed requests continue to the wrapped handler. Rejected requests default to
 `429 Too Many Requests` with `Retry-After` set to the whole number of seconds
 until the quota window resets, rounded up. Request-mapping and quota-store
@@ -120,6 +160,11 @@ Use `ratelimit.WithRejectionHandler` to customize rejected responses and
 `ratelimit.WithErrorHandler` to log errors, write a custom response, or return
 `true` to fail open. The middleware passes the incoming request context to the
 limiter and does not select a caller identity automatically.
+`ratelimit.RetryAfter` is available when the same header formatting is needed
+outside middleware. A request mapper can return `ratelimit.ErrSkip` when a
+configured policy is disabled or does not apply to the current request; the
+middleware then continues without consuming quota or invoking the error
+handler.
 
 ### Client-IP buckets
 
@@ -181,6 +226,7 @@ limiter, err := quota.New(store)
 - Windows are fixed and aligned to UTC epoch boundaries. A 24-hour window
   resets at 00:00 UTC.
 - Rejected amounts do not change the counter.
+- Rejected batches do not change any counter in the batch.
 - Store errors are returned to the caller. The application chooses whether a
   particular policy fails open or closed.
 - Refunded counters floor at zero and retain their original expiry.

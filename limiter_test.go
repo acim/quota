@@ -41,6 +41,118 @@ func TestLimiterConsumesWeightedAmounts(t *testing.T) {
 	}
 }
 
+func TestLimiterConsumesBatchAtomically(t *testing.T) {
+	t.Parallel()
+	limiter := newTestLimiter(t)
+	requests := []Request{
+		{Namespace: "forms", Bucket: "client", Amount: 1, Rule: Rule{Capacity: 2, Window: time.Minute}},
+		{Namespace: "forms", Bucket: "client", Amount: 1, Rule: Rule{Capacity: 1, Window: time.Hour}},
+	}
+
+	first, err := limiter.ConsumeBatch(context.Background(), requests)
+	if err != nil || !first.Allowed || len(first.Decisions) != 2 {
+		t.Fatalf("first ConsumeBatch() = %+v, %v", first, err)
+	}
+	rejected, err := limiter.ConsumeBatch(context.Background(), requests)
+	if err != nil || rejected.Allowed || len(rejected.Decisions) != 2 {
+		t.Fatalf("rejected ConsumeBatch() = %+v, %v", rejected, err)
+	}
+	if !rejected.Decisions[0].Allowed || rejected.Decisions[1].Allowed {
+		t.Fatalf("rejected per-rule decisions = %+v, want minute allowed and hour blocked", rejected.Decisions)
+	}
+
+	minuteOnly := requests[0]
+	decision, err := limiter.Consume(context.Background(), minuteOnly)
+	if err != nil || !decision.Allowed || decision.Used != 2 {
+		t.Fatalf("minute Consume() after rejected batch = %+v, %v; want atomic rollback", decision, err)
+	}
+}
+
+func TestLimiterConsumeBatchValidatesRequestsAndStoreCapability(t *testing.T) {
+	t.Parallel()
+	valid := Request{Namespace: "forms", Bucket: "client", Amount: 1, Rule: Rule{Capacity: 1, Window: time.Minute}}
+	limiter := newTestLimiter(t)
+	if _, err := limiter.ConsumeBatch(context.Background(), nil); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("ConsumeBatch(nil) error = %v, want ErrInvalidRequest", err)
+	}
+	if _, err := limiter.ConsumeBatch(context.Background(), []Request{valid, valid}); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("ConsumeBatch(duplicate) error = %v, want ErrInvalidRequest", err)
+	}
+
+	nonBatchLimiter, err := New(&stubStore{})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if _, err := nonBatchLimiter.ConsumeBatch(context.Background(), []Request{valid}); !errors.Is(err, ErrBatchUnsupported) {
+		t.Fatalf("ConsumeBatch(non-batch store) error = %v, want ErrBatchUnsupported", err)
+	}
+}
+
+func TestBatchDecisionRetryAtUsesLatestBlockingWindow(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 8, 19, 12, 0, 0, 0, time.UTC)
+	decision := BatchDecision{Allowed: false, Decisions: []Decision{
+		{Requested: 1, Capacity: 5, Used: 5, ResetAt: now.Add(time.Minute)},
+		{Allowed: true, Requested: 1, Capacity: 30, Used: 29, ResetAt: now.Add(time.Hour)},
+		{Requested: 1, Capacity: 100, Used: 100, ResetAt: now.Add(24 * time.Hour)},
+	}}
+	if got, want := decision.RetryAt(), now.Add(24*time.Hour); !got.Equal(want) {
+		t.Fatalf("RetryAt() = %v, want %v", got, want)
+	}
+	decision.Allowed = true
+	if got := decision.RetryAt(); !got.IsZero() {
+		t.Fatalf("allowed RetryAt() = %v, want zero", got)
+	}
+	decision = BatchDecision{Allowed: false, Decisions: []Decision{
+		{Allowed: true, Requested: 1, Capacity: 5, Used: 0, ResetAt: now.Add(time.Minute)},
+		{Allowed: true, Requested: 1, Capacity: 30, Used: 0, ResetAt: now.Add(time.Hour)},
+	}}
+	if got, want := decision.RetryAt(), now.Add(time.Hour); !got.Equal(want) {
+		t.Fatalf("fallback RetryAt() = %v, want %v", got, want)
+	}
+}
+
+func TestLimiterConsumeBatchPropagatesStoreErrorsAndInvalidResults(t *testing.T) {
+	t.Parallel()
+	request := Request{Namespace: "forms", Bucket: "client", Amount: 1, Rule: Rule{Capacity: 1, Window: time.Minute}}
+	storeErr := errors.New("store unavailable")
+	for name, store := range map[string]*stubBatchStore{
+		"store error":    {batchErr: storeErr},
+		"invalid result": {batchCounter: BatchCounter{Allowed: true}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			limiter, err := New(store)
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+			_, err = limiter.ConsumeBatch(context.Background(), []Request{request})
+			if name == "store error" && !errors.Is(err, storeErr) {
+				t.Fatalf("ConsumeBatch() error = %v, want store error", err)
+			}
+			if name == "invalid result" && err == nil {
+				t.Fatal("ConsumeBatch() error = nil, want invalid result error")
+			}
+		})
+	}
+}
+
+func TestMemoryStoreBatchHonorsCancellationAndValidation(t *testing.T) {
+	t.Parallel()
+	store := NewMemoryStore()
+	valid := BatchTake{Key: "minute", Amount: 1, Capacity: 1, TTL: time.Minute}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := store.TakeBatch(ctx, []BatchTake{valid}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("TakeBatch(canceled) error = %v, want context.Canceled", err)
+	}
+	if _, err := store.TakeBatch(context.Background(), nil); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("TakeBatch(nil) error = %v, want ErrInvalidRequest", err)
+	}
+	if _, err := store.TakeBatch(context.Background(), []BatchTake{valid, valid}); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("TakeBatch(duplicate) error = %v, want ErrInvalidRequest", err)
+	}
+}
+
 func TestLimiterUsesIsolatedUTCAlignedWindows(t *testing.T) {
 	t.Parallel()
 	limiter := newTestLimiter(t)
@@ -322,6 +434,49 @@ func TestMemoryStoreAdmissionIsAtomic(t *testing.T) {
 	}
 }
 
+func TestMemoryStoreBatchAdmissionIsAtomicUnderConcurrency(t *testing.T) {
+	t.Parallel()
+	limiter := newTestLimiter(t)
+	requests := []Request{
+		{Namespace: "batch-concurrency", Bucket: "shared", Amount: 1, Rule: Rule{Capacity: 25, Window: time.Minute}},
+		{Namespace: "batch-concurrency", Bucket: "shared", Amount: 1, Rule: Rule{Capacity: 10, Window: time.Hour}},
+	}
+	const workers = 64
+	start := make(chan struct{})
+	results := make(chan bool, workers)
+	var group sync.WaitGroup
+	for range workers {
+		group.Go(func() {
+			<-start
+			decision, err := limiter.ConsumeBatch(context.Background(), requests)
+			if err != nil {
+				t.Errorf("ConsumeBatch() error = %v", err)
+				return
+			}
+			results <- decision.Allowed
+		})
+	}
+	close(start)
+	group.Wait()
+	close(results)
+	accepted := 0
+	for allowed := range results {
+		if allowed {
+			accepted++
+		}
+	}
+	if accepted != 10 {
+		t.Fatalf("accepted batches = %d, want 10", accepted)
+	}
+
+	minute := requests[0]
+	minute.Amount = 15
+	decision, err := limiter.Consume(context.Background(), minute)
+	if err != nil || !decision.Allowed || decision.Used != 25 {
+		t.Fatalf("minute Consume() after concurrent batches = %+v, %v; want no partial charges", decision, err)
+	}
+}
+
 func TestMemoryStoreHonorsCancellationAndValidation(t *testing.T) {
 	t.Parallel()
 	store := NewMemoryStore()
@@ -355,6 +510,16 @@ type stubStore struct {
 	takeErr   error
 	refundErr error
 	refunded  int64
+}
+
+type stubBatchStore struct {
+	stubStore
+	batchCounter BatchCounter
+	batchErr     error
+}
+
+func (s *stubBatchStore) TakeBatch(context.Context, []BatchTake) (BatchCounter, error) {
+	return s.batchCounter, s.batchErr
 }
 
 func (s *stubStore) Take(context.Context, string, int64, int64, time.Duration) (Counter, error) {
