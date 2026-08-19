@@ -4,6 +4,9 @@
 windows. The caller decides what one unit means: a request, byte, job,
 recipient, model token, image, or another resource.
 
+[![pipeline](https://github.com/acim/quota/actions/workflows/pipeline.yaml/badge.svg)](https://github.com/acim/quota/actions/workflows/pipeline.yaml)
+[![reference](https://pkg.go.dev/badge/go.acim.net/quota.svg)](https://pkg.go.dev/go.acim.net/quota)
+
 The module provides:
 
 - atomic weighted admission without charging rejected amounts;
