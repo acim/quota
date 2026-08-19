@@ -130,7 +130,7 @@ authentication, proxy trust, and route policy remain application-owned:
 ```go
 chatLimit, err := ratelimit.Middleware(limiter, func(req *http.Request) (quota.Request, error) {
 	return quota.Request{
-		Namespace: "vega:http:chat",
+		Namespace: "example:http:chat",
 		Bucket:    "authenticated-api",
 		Amount:    1,
 		Rule: quota.Rule{
@@ -143,7 +143,7 @@ if err != nil {
 	return err
 }
 
-mux.Handle("POST /chats", chatLimit(http.HandlerFunc(vega.Chat)))
+mux.Handle("POST /chats", chatLimit(http.HandlerFunc(handleChat)))
 ```
 
 For endpoints governed by multiple rules, use `ratelimit.BatchMiddleware` and
@@ -186,7 +186,7 @@ publicChatLimit, err := ratelimit.Middleware(limiter, func(req *http.Request) (q
 		return quota.Request{}, err
 	}
 	return quota.Request{
-		Namespace: "vega:http:public-chat",
+		Namespace: "example:http:public-chat",
 		Bucket:    "ip:" + ip.String(),
 		Amount:    1,
 		Rule: quota.Rule{

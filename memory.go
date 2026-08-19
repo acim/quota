@@ -69,6 +69,9 @@ func (s *MemoryStore) TakeBatch(ctx context.Context, takes []BatchTake) (BatchCo
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return BatchCounter{}, err
+	}
 	now := s.now()
 	s.pruneExpiredLocked(now)
 	entries := make([]memoryEntry, len(takes))

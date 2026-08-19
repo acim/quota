@@ -153,6 +153,63 @@ func TestMemoryStoreBatchHonorsCancellationAndValidation(t *testing.T) {
 	}
 }
 
+func TestMemoryStoreBatchDoesNotChargeWhenCanceledWhileWaitingForLock(t *testing.T) {
+	t.Parallel()
+	store := NewMemoryStore()
+	takes := []BatchTake{
+		{Key: "minute", Amount: 1, Capacity: 2, TTL: time.Minute},
+		{Key: "hour", Amount: 1, Capacity: 2, TTL: time.Hour},
+	}
+	if result, err := store.TakeBatch(context.Background(), takes); err != nil || !result.Allowed {
+		t.Fatalf("prime TakeBatch() = %+v, %v", result, err)
+	}
+
+	store.mu.Lock()
+	base, cancel := context.WithCancel(context.Background())
+	ctx := &observedContext{Context: base, errChecked: make(chan struct{})}
+	result := make(chan error, 1)
+	go func() {
+		_, err := store.TakeBatch(ctx, takes)
+		result <- err
+	}()
+	<-ctx.errChecked
+	cancel()
+	store.mu.Unlock()
+
+	if err := <-result; !errors.Is(err, context.Canceled) {
+		t.Fatalf("TakeBatch() error = %v, want context.Canceled", err)
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	for _, take := range takes {
+		if got := store.entries[take.Key].used; got != 1 {
+			t.Fatalf("counter %q used = %d, want 1", take.Key, got)
+		}
+	}
+}
+
+func TestMemoryStoreBatchCountersExpire(t *testing.T) {
+	t.Parallel()
+	store := NewMemoryStore()
+	now := time.Date(2026, 8, 19, 12, 0, 0, 0, time.UTC)
+	store.now = func() time.Time { return now }
+	takes := []BatchTake{
+		{Key: "minute", Amount: 1, Capacity: 1, TTL: time.Second},
+		{Key: "hour", Amount: 1, Capacity: 1, TTL: time.Second},
+	}
+	if result, err := store.TakeBatch(context.Background(), takes); err != nil || !result.Allowed {
+		t.Fatalf("first TakeBatch() = %+v, %v", result, err)
+	}
+	if result, err := store.TakeBatch(context.Background(), takes); err != nil || result.Allowed {
+		t.Fatalf("TakeBatch() before expiry = %+v, %v", result, err)
+	}
+
+	now = now.Add(2 * time.Second)
+	if result, err := store.TakeBatch(context.Background(), takes); err != nil || !result.Allowed {
+		t.Fatalf("TakeBatch() after expiry = %+v, %v", result, err)
+	}
+}
+
 func TestLimiterUsesIsolatedUTCAlignedWindows(t *testing.T) {
 	t.Parallel()
 	limiter := newTestLimiter(t)
@@ -516,6 +573,17 @@ type stubBatchStore struct {
 	stubStore
 	batchCounter BatchCounter
 	batchErr     error
+}
+
+type observedContext struct {
+	context.Context
+	errChecked chan struct{}
+	once       sync.Once
+}
+
+func (c *observedContext) Err() error {
+	c.once.Do(func() { close(c.errChecked) })
+	return c.Context.Err()
 }
 
 func (s *stubBatchStore) TakeBatch(context.Context, []BatchTake) (BatchCounter, error) {

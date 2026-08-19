@@ -319,6 +319,37 @@ func TestValkeyStoreExpiresCounters(t *testing.T) {
 	}
 }
 
+func TestValkeyStoreBatchCountersExpire(t *testing.T) {
+	t.Parallel()
+	store, _ := newTestValkeyStore(t)
+	ctx := context.Background()
+	takes := []BatchTake{
+		{Key: uniqueValkeyKey(t, "batch-expiry-minute"), Amount: 1, Capacity: 1, TTL: 20 * time.Millisecond},
+		{Key: uniqueValkeyKey(t, "batch-expiry-hour"), Amount: 1, Capacity: 1, TTL: 20 * time.Millisecond},
+	}
+	if result, err := store.TakeBatch(ctx, takes); err != nil || !result.Allowed {
+		t.Fatalf("first TakeBatch() = %+v, %v", result, err)
+	}
+	if result, err := store.TakeBatch(ctx, takes); err != nil || result.Allowed {
+		t.Fatalf("TakeBatch() before expiry = %+v, %v", result, err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		result, err := store.TakeBatch(ctx, takes)
+		if err != nil {
+			t.Fatalf("TakeBatch() while awaiting expiry error = %v", err)
+		}
+		if result.Allowed {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("batch counters did not expire within 2 seconds")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func newTestValkeyLimiter(t *testing.T) *Limiter {
 	t.Helper()
 	store, _ := newTestValkeyStore(t)

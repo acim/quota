@@ -49,7 +49,7 @@ func TestMiddlewareAllowsRequestAndForwardsContextAndMappedRequest(t *testing.T)
 	type contextKey string
 	const key contextKey = "request-id"
 	wantRequest := quota.Request{
-		Namespace: "vega:http:chat",
+		Namespace: "example:http:chat",
 		Bucket:    "client-42",
 		Amount:    2,
 		Rule:      quota.Rule{Capacity: 10, Window: time.Minute},
@@ -322,7 +322,7 @@ func TestMiddlewareWithMemoryStore(t *testing.T) {
 	}
 	middleware, err := Middleware(limiter, func(*http.Request) (quota.Request, error) {
 		return quota.Request{
-			Namespace: "vega:http:chat",
+			Namespace: "example:http:chat",
 			Bucket:    "authenticated-api",
 			Amount:    1,
 			Rule:      quota.Rule{Capacity: 2, Window: time.Minute},
@@ -386,6 +386,210 @@ func TestBatchMiddlewareRejectsAtomicallyWithLatestBlockingRetry(t *testing.T) {
 	}
 }
 
+func TestBatchMiddlewareAllowsRequestAndForwardsContextAndMappedRequests(t *testing.T) {
+	t.Parallel()
+	type contextKey string
+	const key contextKey = "request-id"
+	wantRequests := []quota.Request{
+		{Namespace: "example:http:forms", Bucket: "client-42", Amount: 1, Rule: quota.Rule{Capacity: 5, Window: time.Minute}},
+		{Namespace: "example:http:forms", Bucket: "client-42", Amount: 1, Rule: quota.Rule{Capacity: 30, Window: time.Hour}},
+	}
+	var gotContext context.Context
+	var gotRequests []quota.Request
+	consumer := batchConsumerFunc(func(ctx context.Context, requests []quota.Request) (quota.BatchDecision, error) {
+		gotContext = ctx
+		gotRequests = requests
+		return quota.BatchDecision{Allowed: true}, nil
+	})
+	middleware, err := BatchMiddleware(consumer, func(*http.Request) ([]quota.Request, error) {
+		return wantRequests, nil
+	})
+	if err != nil {
+		t.Fatalf("BatchMiddleware() error = %v", err)
+	}
+
+	called := 0
+	handler := middleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called++ }))
+	request := httptest.NewRequest(http.MethodPost, "/forms", nil)
+	request = request.WithContext(context.WithValue(request.Context(), key, "abc123"))
+	handler.ServeHTTP(httptest.NewRecorder(), request)
+
+	if called != 1 {
+		t.Fatalf("downstream calls = %d, want 1", called)
+	}
+	if gotContext != request.Context() || gotContext.Value(key) != "abc123" {
+		t.Fatal("ConsumeBatch() did not receive the incoming request context")
+	}
+	if !reflect.DeepEqual(gotRequests, wantRequests) {
+		t.Fatalf("ConsumeBatch() requests = %+v, want %+v", gotRequests, wantRequests)
+	}
+}
+
+func TestBatchMiddlewareDefaultsToFailClosedForMappingAndConsumerErrors(t *testing.T) {
+	t.Parallel()
+	mapErr := errors.New("map batch request")
+	storeErr := errors.New("store unavailable")
+	tests := []struct {
+		name     string
+		consumer BatchConsumer
+		request  BatchRequestFunc
+	}{
+		{
+			name: "mapping error",
+			consumer: batchConsumerFunc(func(context.Context, []quota.Request) (quota.BatchDecision, error) {
+				t.Fatal("ConsumeBatch() called after mapping error")
+				return quota.BatchDecision{}, nil
+			}),
+			request: func(*http.Request) ([]quota.Request, error) { return nil, mapErr },
+		},
+		{
+			name: "consumer error",
+			consumer: batchConsumerFunc(func(context.Context, []quota.Request) (quota.BatchDecision, error) {
+				return quota.BatchDecision{}, storeErr
+			}),
+			request: staticBatchRequest,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			middleware, err := BatchMiddleware(test.consumer, test.request)
+			if err != nil {
+				t.Fatalf("BatchMiddleware() error = %v", err)
+			}
+			called := 0
+			recorder := httptest.NewRecorder()
+			middleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called++ })).ServeHTTP(
+				recorder,
+				httptest.NewRequest(http.MethodGet, "/", nil),
+			)
+			if called != 0 {
+				t.Fatalf("downstream calls = %d, want 0", called)
+			}
+			if recorder.Code != http.StatusServiceUnavailable {
+				t.Fatalf("status = %d, want %d", recorder.Code, http.StatusServiceUnavailable)
+			}
+		})
+	}
+}
+
+func TestBatchMiddlewareSkipBypassesAdmissionAndErrorHandling(t *testing.T) {
+	t.Parallel()
+	consumer := batchConsumerFunc(func(context.Context, []quota.Request) (quota.BatchDecision, error) {
+		t.Fatal("ConsumeBatch() called for skipped request")
+		return quota.BatchDecision{}, nil
+	})
+	errorCalls := 0
+	middleware, err := BatchMiddleware(consumer, func(*http.Request) ([]quota.Request, error) {
+		return nil, ErrSkip
+	}, WithErrorHandler(func(http.ResponseWriter, *http.Request, error) bool {
+		errorCalls++
+		return false
+	}))
+	if err != nil {
+		t.Fatalf("BatchMiddleware() error = %v", err)
+	}
+	called := 0
+	middleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called++ })).ServeHTTP(
+		httptest.NewRecorder(),
+		httptest.NewRequest(http.MethodGet, "/", nil),
+	)
+	if called != 1 || errorCalls != 0 {
+		t.Fatalf("downstream calls = %d, error calls = %d; want 1, 0", called, errorCalls)
+	}
+}
+
+func TestBatchMiddlewareCustomErrorHandlerCanFailOpenExactlyOnce(t *testing.T) {
+	t.Parallel()
+	wantErr := errors.New("store unavailable")
+	consumer := batchConsumerFunc(func(context.Context, []quota.Request) (quota.BatchDecision, error) {
+		return quota.BatchDecision{}, wantErr
+	})
+	var gotRequest *http.Request
+	var gotErr error
+	middleware, err := BatchMiddleware(consumer, staticBatchRequest, WithErrorHandler(func(_ http.ResponseWriter, request *http.Request, err error) bool {
+		gotRequest = request
+		gotErr = err
+		return true
+	}))
+	if err != nil {
+		t.Fatalf("BatchMiddleware() error = %v", err)
+	}
+
+	called := 0
+	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	middleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called++ })).ServeHTTP(httptest.NewRecorder(), request)
+	if called != 1 {
+		t.Fatalf("downstream calls = %d, want 1", called)
+	}
+	if gotRequest != request || !errors.Is(gotErr, wantErr) {
+		t.Fatalf("error handler received request %p and error %v", gotRequest, gotErr)
+	}
+}
+
+func TestBatchMiddlewareCustomHandlersReceiveRequestAndOutcome(t *testing.T) {
+	t.Parallel()
+	t.Run("rejection", func(t *testing.T) {
+		t.Parallel()
+		now := time.Date(2026, 8, 19, 12, 0, 0, 0, time.UTC)
+		wantDecision := quota.Decision{Allowed: false, Capacity: 30, Used: 30, ResetAt: now.Add(time.Hour)}
+		consumer := batchConsumerFunc(func(context.Context, []quota.Request) (quota.BatchDecision, error) {
+			return quota.BatchDecision{Allowed: false, Decisions: []quota.Decision{
+				{Allowed: false, Capacity: 5, Used: 5, ResetAt: now.Add(time.Minute)},
+				wantDecision,
+			}}, nil
+		})
+		var gotRequest *http.Request
+		var gotDecision quota.Decision
+		middleware, err := BatchMiddleware(consumer, staticBatchRequest, WithRejectionHandler(func(w http.ResponseWriter, request *http.Request, decision quota.Decision) {
+			gotRequest = request
+			gotDecision = decision
+			w.WriteHeader(http.StatusTeapot)
+		}))
+		if err != nil {
+			t.Fatalf("BatchMiddleware() error = %v", err)
+		}
+		request := httptest.NewRequest(http.MethodGet, "/", nil)
+		recorder := httptest.NewRecorder()
+		middleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+			t.Fatal("downstream handler called")
+		})).ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusTeapot || gotRequest != request || !reflect.DeepEqual(gotDecision, wantDecision) {
+			t.Fatalf("custom rejection response = %d, request = %p, decision = %+v", recorder.Code, gotRequest, gotDecision)
+		}
+	})
+
+	t.Run("error", func(t *testing.T) {
+		t.Parallel()
+		wantErr := errors.New("map batch request")
+		var gotRequest *http.Request
+		var gotErr error
+		middleware, err := BatchMiddleware(batchConsumerFunc(func(context.Context, []quota.Request) (quota.BatchDecision, error) {
+			t.Fatal("ConsumeBatch() called after mapping error")
+			return quota.BatchDecision{}, nil
+		}), func(*http.Request) ([]quota.Request, error) {
+			return nil, wantErr
+		}, WithErrorHandler(func(w http.ResponseWriter, request *http.Request, err error) bool {
+			gotRequest = request
+			gotErr = err
+			w.WriteHeader(http.StatusBadRequest)
+			return false
+		}))
+		if err != nil {
+			t.Fatalf("BatchMiddleware() error = %v", err)
+		}
+		request := httptest.NewRequest(http.MethodGet, "/", nil)
+		recorder := httptest.NewRecorder()
+		middleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+			t.Fatal("downstream handler called")
+		})).ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusBadRequest || gotRequest != request || !errors.Is(gotErr, wantErr) {
+			t.Fatalf("custom error response = %d, request = %p, error = %v", recorder.Code, gotRequest, gotErr)
+		}
+	})
+}
+
 func TestBatchMiddlewareWithMemoryStore(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 8, 19, 12, 0, 0, 0, time.UTC)
@@ -443,4 +647,8 @@ func (*nilConsumer) Consume(context.Context, quota.Request) (quota.Decision, err
 
 func staticRequest(*http.Request) (quota.Request, error) {
 	return quota.Request{Namespace: "api", Bucket: "client", Amount: 1, Rule: quota.Rule{Capacity: 1, Window: time.Minute}}, nil
+}
+
+func staticBatchRequest(*http.Request) ([]quota.Request, error) {
+	return []quota.Request{{Namespace: "api", Bucket: "client", Amount: 1, Rule: quota.Rule{Capacity: 1, Window: time.Minute}}}, nil
 }

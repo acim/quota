@@ -1,6 +1,6 @@
 .PHONY: lint test integration-up integration-down integration-test coverage check update
 
-COVERAGE_THRESHOLD := 90.0
+COVERAGE_THRESHOLD := 95.0
 QUOTA_VALKEY_URL ?= redis://localhost:16379/0
 
 lint:
