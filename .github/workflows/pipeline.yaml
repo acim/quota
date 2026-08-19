@@ -26,7 +26,6 @@ jobs:
     with:
       lint-command: make lint
       test-command: make test
-      extra-check-command: make coverage
       go-experiment: jsonv2
 
   valkey-integration:
@@ -51,7 +50,7 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Run Valkey integration tests
+      - name: Run Valkey integration tests with coverage
         env:
           QUOTA_VALKEY_URL: redis://localhost:6379/0
-        run: make integration-test
+        run: make coverage
