@@ -40,12 +40,43 @@ type Limiter struct {
 	now   func() time.Time
 }
 
+// Option configures a Limiter.
+type Option interface {
+	apply(*Limiter) error
+}
+
+type optionFunc func(*Limiter) error
+
+func (option optionFunc) apply(limiter *Limiter) error {
+	return option(limiter)
+}
+
+// WithClock configures the clock used to align quota windows.
+func WithClock(now func() time.Time) Option {
+	return optionFunc(func(limiter *Limiter) error {
+		if now == nil {
+			return fmt.Errorf("%w: clock is required", ErrInvalidRequest)
+		}
+		limiter.now = now
+		return nil
+	})
+}
+
 // New creates a Limiter backed by store.
-func New(store Store) (*Limiter, error) {
+func New(store Store, options ...Option) (*Limiter, error) {
 	if store == nil {
 		return nil, fmt.Errorf("%w: store is required", ErrInvalidRequest)
 	}
-	return &Limiter{store: store, now: time.Now}, nil
+	limiter := &Limiter{store: store, now: time.Now}
+	for _, option := range options {
+		if option == nil {
+			return nil, fmt.Errorf("%w: option is required", ErrInvalidRequest)
+		}
+		if err := option.apply(limiter); err != nil {
+			return nil, err
+		}
+	}
+	return limiter, nil
 }
 
 // Consume admits an amount that is known before work begins.

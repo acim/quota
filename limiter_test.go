@@ -77,6 +77,43 @@ func TestLimiterUsesIsolatedUTCAlignedWindows(t *testing.T) {
 	}
 }
 
+func TestLimiterUsesConfiguredClock(t *testing.T) {
+	t.Parallel()
+	now := time.Unix(5, 250_000_000).UTC()
+	limiter, err := New(NewMemoryStore(), WithClock(func() time.Time { return now }))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	decision, err := limiter.Consume(context.Background(), Request{
+		Namespace: "api",
+		Bucket:    "customer-42",
+		Amount:    1,
+		Rule:      Rule{Capacity: 1, Window: 1500 * time.Millisecond},
+	})
+	if err != nil {
+		t.Fatalf("Consume() error = %v", err)
+	}
+	wantReset := time.Unix(6, 0).UTC()
+	if !decision.ResetAt.Equal(wantReset) {
+		t.Fatalf("ResetAt = %v, want %v", decision.ResetAt, wantReset)
+	}
+}
+
+func TestLimiterRejectsInvalidOptions(t *testing.T) {
+	t.Parallel()
+	for name, option := range map[string]Option{
+		"nil clock":  WithClock(nil),
+		"nil option": nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := New(NewMemoryStore(), option); !errors.Is(err, ErrInvalidRequest) {
+				t.Fatalf("New() error = %v, want ErrInvalidRequest", err)
+			}
+		})
+	}
+}
+
 func TestReservationCommitAndRelease(t *testing.T) {
 	t.Parallel()
 	limiter := newTestLimiter(t)
