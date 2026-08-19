@@ -45,6 +45,30 @@ func TestValkeyLimiterConsumesWeightedAmounts(t *testing.T) {
 	}
 }
 
+func TestValkeyLimiterConsumesBatchAtomically(t *testing.T) {
+	t.Parallel()
+	limiter := newTestValkeyLimiter(t)
+	namespace := uniqueValkeyKey(t, "batch")
+	requests := []Request{
+		{Namespace: namespace, Bucket: "client", Amount: 1, Rule: Rule{Capacity: 2, Window: time.Minute}},
+		{Namespace: namespace, Bucket: "client", Amount: 1, Rule: Rule{Capacity: 1, Window: time.Hour}},
+	}
+
+	first, err := limiter.ConsumeBatch(context.Background(), requests)
+	if err != nil || !first.Allowed || len(first.Decisions) != 2 {
+		t.Fatalf("first ConsumeBatch() = %+v, %v", first, err)
+	}
+	rejected, err := limiter.ConsumeBatch(context.Background(), requests)
+	if err != nil || rejected.Allowed || len(rejected.Decisions) != 2 {
+		t.Fatalf("rejected ConsumeBatch() = %+v, %v", rejected, err)
+	}
+
+	decision, err := limiter.Consume(context.Background(), requests[0])
+	if err != nil || !decision.Allowed || decision.Used != 2 {
+		t.Fatalf("minute Consume() after rejected batch = %+v, %v; want atomic rollback", decision, err)
+	}
+}
+
 func TestValkeyLimiterIsolatesNamespacesBucketsAndWindows(t *testing.T) {
 	t.Parallel()
 	limiter := newTestValkeyLimiter(t)
@@ -202,6 +226,55 @@ func TestValkeyLimiterSharesQuotaAcrossClientsConcurrently(t *testing.T) {
 	}
 }
 
+func TestValkeyLimiterConsumesBatchAtomicallyAcrossClients(t *testing.T) {
+	t.Parallel()
+	first := newTestValkeyLimiter(t)
+	second := newTestValkeyLimiter(t)
+	namespace := uniqueValkeyKey(t, "batch-distributed")
+	requests := []Request{
+		{Namespace: namespace, Bucket: "shared", Amount: 1, Rule: Rule{Capacity: 25, Window: time.Minute}},
+		{Namespace: namespace, Bucket: "shared", Amount: 1, Rule: Rule{Capacity: 10, Window: time.Hour}},
+	}
+	const workers = 64
+	start := make(chan struct{})
+	results := make(chan bool, workers)
+	var group sync.WaitGroup
+	for index := range workers {
+		limiter := first
+		if index%2 == 1 {
+			limiter = second
+		}
+		group.Go(func() {
+			<-start
+			decision, err := limiter.ConsumeBatch(context.Background(), requests)
+			if err != nil {
+				t.Errorf("ConsumeBatch() error = %v", err)
+				return
+			}
+			results <- decision.Allowed
+		})
+	}
+	close(start)
+	group.Wait()
+	close(results)
+	accepted := 0
+	for allowed := range results {
+		if allowed {
+			accepted++
+		}
+	}
+	if accepted != 10 {
+		t.Fatalf("accepted batches = %d, want 10", accepted)
+	}
+
+	minute := requests[0]
+	minute.Amount = 15
+	decision, err := first.Consume(context.Background(), minute)
+	if err != nil || !decision.Allowed || decision.Used != 25 {
+		t.Fatalf("minute Consume() after concurrent batches = %+v, %v; want no partial charges", decision, err)
+	}
+}
+
 func TestValkeyLimiterPropagatesCancellation(t *testing.T) {
 	t.Parallel()
 	limiter := newTestValkeyLimiter(t)
@@ -241,6 +314,37 @@ func TestValkeyStoreExpiresCounters(t *testing.T) {
 		}
 		if time.Now().After(deadline) {
 			t.Fatal("counter did not expire within 2 seconds")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestValkeyStoreBatchCountersExpire(t *testing.T) {
+	t.Parallel()
+	store, _ := newTestValkeyStore(t)
+	ctx := context.Background()
+	takes := []BatchTake{
+		{Key: uniqueValkeyKey(t, "batch-expiry-minute"), Amount: 1, Capacity: 1, TTL: 20 * time.Millisecond},
+		{Key: uniqueValkeyKey(t, "batch-expiry-hour"), Amount: 1, Capacity: 1, TTL: 20 * time.Millisecond},
+	}
+	if result, err := store.TakeBatch(ctx, takes); err != nil || !result.Allowed {
+		t.Fatalf("first TakeBatch() = %+v, %v", result, err)
+	}
+	if result, err := store.TakeBatch(ctx, takes); err != nil || result.Allowed {
+		t.Fatalf("TakeBatch() before expiry = %+v, %v", result, err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		result, err := store.TakeBatch(ctx, takes)
+		if err != nil {
+			t.Fatalf("TakeBatch() while awaiting expiry error = %v", err)
+		}
+		if result.Allowed {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("batch counters did not expire within 2 seconds")
 		}
 		time.Sleep(10 * time.Millisecond)
 	}

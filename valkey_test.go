@@ -188,6 +188,36 @@ func TestValkeyStoreUsesExactInt64Comparisons(t *testing.T) {
 	})
 }
 
+func TestValkeyStoreBatchPreservesExactInt64ValuesAndRollsBackOverflow(t *testing.T) {
+	t.Parallel()
+	store, client := newTestValkeyStore(t)
+	ctx := context.Background()
+	firstKey := uniqueValkeyKey(t, "batch-overflow-first")
+	secondKey := uniqueValkeyKey(t, "batch-overflow-second")
+	if result, err := store.Take(ctx, firstKey, 5, 10, time.Minute); err != nil || !result.Allowed {
+		t.Fatalf("prime first counter = %+v, %v", result, err)
+	}
+	if result, err := store.Take(ctx, secondKey, math.MaxInt64, math.MaxInt64, time.Minute); err != nil || !result.Allowed {
+		t.Fatalf("prime second counter = %+v, %v", result, err)
+	}
+
+	_, err := store.TakeBatch(ctx, []BatchTake{
+		{Key: firstKey, Amount: 1, Capacity: 10, TTL: time.Minute},
+		{Key: secondKey, Amount: 1, Capacity: math.MaxInt64, TTL: time.Minute},
+	})
+	if !errors.Is(err, ErrCounterOverflow) {
+		t.Fatalf("TakeBatch(overflow) error = %v, want ErrCounterOverflow", err)
+	}
+	firstValue, err := client.Do(ctx, client.B().Get().Key(firstKey).Build()).AsInt64()
+	if err != nil || firstValue != 5 {
+		t.Fatalf("first counter after overflow = %d, %v; want rollback to 5", firstValue, err)
+	}
+	secondValue, err := client.Do(ctx, client.B().Get().Key(secondKey).Build()).AsInt64()
+	if err != nil || secondValue != math.MaxInt64 {
+		t.Fatalf("second counter after overflow = %d, %v; want MaxInt64", secondValue, err)
+	}
+}
+
 func newTestValkeyStore(t *testing.T) (*ValkeyStore, valkey.Client) {
 	t.Helper()
 	url := os.Getenv("QUOTA_VALKEY_URL")

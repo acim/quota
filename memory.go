@@ -8,6 +8,7 @@ import (
 )
 
 var _ Store = (*MemoryStore)(nil)
+var _ BatchStore = (*MemoryStore)(nil)
 
 // MemoryStore keeps counters in the current process. It is suitable for tests
 // and single-instance applications.
@@ -57,6 +58,51 @@ func (s *MemoryStore) Take(ctx context.Context, key string, amount, capacity int
 	return Counter{Allowed: true, Used: entry.used}, nil
 }
 
+// TakeBatch atomically admits every take or leaves every counter unchanged.
+func (s *MemoryStore) TakeBatch(ctx context.Context, takes []BatchTake) (BatchCounter, error) {
+	if err := validateBatchTakes(takes); err != nil {
+		return BatchCounter{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		return BatchCounter{}, err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return BatchCounter{}, err
+	}
+	now := s.now()
+	s.pruneExpiredLocked(now)
+	entries := make([]memoryEntry, len(takes))
+	used := make([]int64, len(takes))
+	allowed := true
+	for index, take := range takes {
+		entry, exists := s.entries[take.Key]
+		if exists && !entry.expiresAt.After(now) {
+			delete(s.entries, take.Key)
+			entry, exists = memoryEntry{}, false
+		}
+		if !exists {
+			entry.expiresAt = now.Add(take.TTL)
+		}
+		entries[index] = entry
+		used[index] = entry.used
+		if take.Amount > take.Capacity || entry.used > take.Capacity-take.Amount {
+			allowed = false
+		}
+	}
+	if !allowed {
+		return BatchCounter{Allowed: false, Used: used}, nil
+	}
+	for index, take := range takes {
+		entries[index].used += take.Amount
+		used[index] = entries[index].used
+		s.entries[take.Key] = entries[index]
+	}
+	return BatchCounter{Allowed: true, Used: used}, nil
+}
+
 // Refund subtracts amount and floors the counter at zero.
 func (s *MemoryStore) Refund(ctx context.Context, key string, amount int64) (int64, error) {
 	if key == "" || amount <= 0 {
@@ -101,6 +147,23 @@ func (s *MemoryStore) pruneExpiredLocked(now time.Time) {
 func validateStoreInput(key string, amount, capacity int64, ttl time.Duration) error {
 	if key == "" || amount <= 0 || capacity <= 0 || ttl <= 0 {
 		return fmt.Errorf("%w: key, amount, capacity, and ttl must be positive", ErrInvalidRequest)
+	}
+	return nil
+}
+
+func validateBatchTakes(takes []BatchTake) error {
+	if len(takes) == 0 {
+		return fmt.Errorf("%w: at least one batch take is required", ErrInvalidRequest)
+	}
+	keys := make(map[string]struct{}, len(takes))
+	for index, take := range takes {
+		if err := validateStoreInput(take.Key, take.Amount, take.Capacity, take.TTL); err != nil {
+			return fmt.Errorf("batch take %d: %w", index, err)
+		}
+		if _, exists := keys[take.Key]; exists {
+			return fmt.Errorf("%w: duplicate key in batch", ErrInvalidRequest)
+		}
+		keys[take.Key] = struct{}{}
 	}
 	return nil
 }

@@ -50,6 +50,44 @@ func ExampleMiddleware() {
 	// 429 60
 }
 
+func ExampleBatchMiddleware() {
+	now := time.Date(2026, 8, 19, 12, 0, 0, 0, time.UTC)
+	limiter, err := quota.New(
+		quota.NewMemoryStore(),
+		quota.WithClock(func() time.Time { return now }),
+	)
+	if err != nil {
+		panic(err)
+	}
+
+	limit, err := ratelimit.BatchMiddleware(limiter, func(*http.Request) ([]quota.Request, error) {
+		return []quota.Request{
+			{Namespace: "example:http:forms", Bucket: "client", Amount: 1, Rule: quota.Rule{Capacity: 2, Window: time.Minute}},
+			{Namespace: "example:http:forms", Bucket: "client", Amount: 1, Rule: quota.Rule{Capacity: 1, Window: time.Hour}},
+		}, nil
+	}, ratelimit.WithClock(func() time.Time { return now }))
+	if err != nil {
+		panic(err)
+	}
+
+	handler := limit(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusNoContent)
+	}))
+	for range 2 {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/forms", nil))
+		fmt.Print(response.Code)
+		if retryAfter := response.Header().Get("Retry-After"); retryAfter != "" {
+			fmt.Print(" ", retryAfter)
+		}
+		fmt.Println()
+	}
+
+	// Output:
+	// 204
+	// 429 3600
+}
+
 func ExampleClientIPResolver() {
 	resolver, err := ratelimit.NewClientIPResolver("10.0.0.0/8")
 	if err != nil {
