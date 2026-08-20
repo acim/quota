@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"slices"
 	"strings"
 )
 
@@ -56,8 +57,8 @@ func (resolver *ClientIPResolver) Resolve(request *http.Request) (netip.Addr, er
 		return peer, nil
 	}
 	chain := strings.Split(strings.Join(forwarded, ","), ",")
-	for index := len(chain) - 1; index >= 0; index-- {
-		address, err := netip.ParseAddr(strings.TrimSpace(chain[index]))
+	for _, value := range slices.Backward(chain) {
+		address, err := netip.ParseAddr(strings.TrimSpace(value))
 		if err != nil {
 			return peer, nil
 		}
