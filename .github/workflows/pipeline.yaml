@@ -26,7 +26,6 @@ jobs:
     with:
       lint-command: make lint
       test-command: make test
-      go-experiment: jsonv2
 
   valkey-integration:
     needs:
