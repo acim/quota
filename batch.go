@@ -78,7 +78,7 @@ func (l *Limiter) ConsumeBatch(ctx context.Context, requests []Request) (BatchDe
 		}
 		windowStart := now.Truncate(request.Rule.Window)
 		resetAt[index] = windowStart.Add(request.Rule.Window)
-		key := counterKey(request, windowStart)
+		key := counterKey(l.keyPrefix, request, windowStart)
 		if _, exists := seenKeys[key]; exists {
 			return BatchDecision{}, fmt.Errorf("%w: duplicate quota counter in batch", ErrInvalidRequest)
 		}
