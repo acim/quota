@@ -36,8 +36,9 @@ type Decision struct {
 
 // Limiter applies quota rules using a Store.
 type Limiter struct {
-	store Store
-	now   func() time.Time
+	store     Store
+	now       func() time.Time
+	keyPrefix string
 }
 
 // Option configures a Limiter.
@@ -62,12 +63,23 @@ func WithClock(now func() time.Time) Option {
 	})
 }
 
+// WithKeyPrefix configures the prefix used for quota counter keys.
+func WithKeyPrefix(prefix string) Option {
+	return optionFunc(func(limiter *Limiter) error {
+		if !validKeyPrefix(prefix) {
+			return fmt.Errorf("%w: key prefix is invalid", ErrInvalidRequest)
+		}
+		limiter.keyPrefix = prefix
+		return nil
+	})
+}
+
 // New creates a Limiter backed by store.
 func New(store Store, options ...Option) (*Limiter, error) {
 	if store == nil {
 		return nil, fmt.Errorf("%w: store is required", ErrInvalidRequest)
 	}
-	limiter := &Limiter{store: store, now: time.Now}
+	limiter := &Limiter{store: store, now: time.Now, keyPrefix: "quota"}
 	for _, option := range options {
 		if option == nil {
 			return nil, fmt.Errorf("%w: option is required", ErrInvalidRequest)
@@ -103,7 +115,7 @@ func (l *Limiter) admit(ctx context.Context, request Request) (Decision, string,
 	now := l.now().UTC()
 	windowStart := now.Truncate(request.Rule.Window)
 	resetAt := windowStart.Add(request.Rule.Window)
-	key := counterKey(request, windowStart)
+	key := counterKey(l.keyPrefix, request, windowStart)
 	counter, err := l.store.Take(ctx, key, request.Amount, request.Rule.Capacity, resetAt.Sub(now))
 	if err != nil {
 		return Decision{}, "", fmt.Errorf("take quota: %w", err)
@@ -139,8 +151,23 @@ func (r Request) validate() error {
 	return nil
 }
 
-func counterKey(request Request, windowStart time.Time) string {
-	return "quota:v1:" + digest(request.Namespace) + ":" + digest(request.Bucket) + ":" +
+func validKeyPrefix(prefix string) bool {
+	if prefix == "" {
+		return false
+	}
+	for _, character := range prefix {
+		if !(character >= 'a' && character <= 'z' ||
+			character >= 'A' && character <= 'Z' ||
+			character >= '0' && character <= '9' ||
+			character == '.' || character == '_' || character == '-' || character == ':') {
+			return false
+		}
+	}
+	return true
+}
+
+func counterKey(prefix string, request Request, windowStart time.Time) string {
+	return prefix + ":v1:" + digest(request.Namespace) + ":" + digest(request.Bucket) + ":" +
 		strconv.FormatInt(int64(request.Rule.Window), 10) + ":" +
 		strconv.FormatInt(windowStart.UnixNano(), 10)
 }

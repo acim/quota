@@ -51,6 +51,21 @@ if !decision.Allowed {
 }
 ```
 
+## Application key prefixes
+
+When applications share a backing store, configure a visible key prefix for
+store ACLs and operational inspection:
+
+```go
+limiter, err := quota.New(store, quota.WithKeyPrefix("myapp:quota"))
+if err != nil {
+	return err
+}
+```
+
+The prefix changes only the store key. `Request.Namespace` still isolates
+quota policies within the application.
+
 ## Consume multiple buckets atomically
 
 Use `ConsumeBatch` when one operation must satisfy multiple quotas, such as a

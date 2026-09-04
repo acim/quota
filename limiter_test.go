@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -266,6 +267,81 @@ func TestLimiterUsesConfiguredClock(t *testing.T) {
 	wantReset := time.Unix(6, 0).UTC()
 	if !decision.ResetAt.Equal(wantReset) {
 		t.Fatalf("ResetAt = %v, want %v", decision.ResetAt, wantReset)
+	}
+}
+
+func TestLimiterKeyPrefixDefaultsAndOverrides(t *testing.T) {
+	t.Parallel()
+	request := Request{Namespace: "vega:public-chat:v1:requests:ip", Bucket: "203.0.113.10", Amount: 1, Rule: Rule{Capacity: 2, Window: time.Minute}}
+
+	defaultStore := &stubStore{}
+	defaultLimiter, err := New(defaultStore, WithClock(func() time.Time { return time.Unix(0, 0) }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := defaultLimiter.Consume(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(defaultStore.lastKey, "quota:v1:") {
+		t.Fatalf("key = %q", defaultStore.lastKey)
+	}
+
+	vegaStore := &stubStore{}
+	vegaLimiter, err := New(vegaStore, WithKeyPrefix("vega:quota"), WithClock(func() time.Time { return time.Unix(0, 0) }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := vegaLimiter.Consume(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(vegaStore.lastKey, "vega:quota:v1:") {
+		t.Fatalf("key = %q", vegaStore.lastKey)
+	}
+}
+
+func TestLimiterKeyPrefixRejectsInvalidValues(t *testing.T) {
+	t.Parallel()
+	for name, prefix := range map[string]string{
+		"empty":                 "",
+		"leading whitespace":    " quota",
+		"trailing whitespace":   "quota ",
+		"control character":     "quota\n",
+		"unsupported character": "quota/slash",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := New(NewMemoryStore(), WithKeyPrefix(prefix)); !errors.Is(err, ErrInvalidRequest) {
+				t.Fatalf("New() error = %v, want ErrInvalidRequest", err)
+			}
+		})
+	}
+}
+
+func TestLimiterKeyPrefixAppliesToBatchAndReservations(t *testing.T) {
+	t.Parallel()
+	request := Request{Namespace: "vega:public-chat:v1:requests:ip", Bucket: "203.0.113.10", Amount: 1, Rule: Rule{Capacity: 2, Window: time.Minute}}
+
+	batchStore := &stubBatchStore{batchCounter: BatchCounter{Allowed: true, Used: []int64{1}}}
+	batchLimiter, err := New(batchStore, WithKeyPrefix("vega:quota"), WithClock(func() time.Time { return time.Unix(0, 0) }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := batchLimiter.ConsumeBatch(context.Background(), []Request{request}); err != nil {
+		t.Fatal(err)
+	}
+	if len(batchStore.lastTakes) != 1 || !strings.HasPrefix(batchStore.lastTakes[0].Key, "vega:quota:v1:") {
+		t.Fatalf("batch keys = %+v", batchStore.lastTakes)
+	}
+
+	reservationStore := &stubStore{counter: Counter{Allowed: true, Used: 1}}
+	reservationLimiter, err := New(reservationStore, WithKeyPrefix("vega:quota"), WithClock(func() time.Time { return time.Unix(0, 0) }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := reservationLimiter.Reserve(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(reservationStore.lastKey, "vega:quota:v1:") {
+		t.Fatalf("reservation key = %q", reservationStore.lastKey)
 	}
 }
 
@@ -567,12 +643,14 @@ type stubStore struct {
 	takeErr   error
 	refundErr error
 	refunded  int64
+	lastKey   string
 }
 
 type stubBatchStore struct {
 	stubStore
 	batchCounter BatchCounter
 	batchErr     error
+	lastTakes    []BatchTake
 }
 
 type observedContext struct {
@@ -586,11 +664,13 @@ func (c *observedContext) Err() error {
 	return c.Context.Err()
 }
 
-func (s *stubBatchStore) TakeBatch(context.Context, []BatchTake) (BatchCounter, error) {
+func (s *stubBatchStore) TakeBatch(_ context.Context, takes []BatchTake) (BatchCounter, error) {
+	s.lastTakes = append([]BatchTake(nil), takes...)
 	return s.batchCounter, s.batchErr
 }
 
-func (s *stubStore) Take(context.Context, string, int64, int64, time.Duration) (Counter, error) {
+func (s *stubStore) Take(_ context.Context, key string, _ int64, _ int64, _ time.Duration) (Counter, error) {
+	s.lastKey = key
 	if s.takeErr != nil {
 		return Counter{}, fmt.Errorf("take: %w", s.takeErr)
 	}
