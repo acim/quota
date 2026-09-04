@@ -156,10 +156,11 @@ func validKeyPrefix(prefix string) bool {
 		return false
 	}
 	for _, character := range prefix {
-		if !(character >= 'a' && character <= 'z' ||
+		valid := character >= 'a' && character <= 'z' ||
 			character >= 'A' && character <= 'Z' ||
 			character >= '0' && character <= '9' ||
-			character == '.' || character == '_' || character == '-' || character == ':') {
+			character == '.' || character == '_' || character == '-' || character == ':'
+		if !valid {
 			return false
 		}
 	}
