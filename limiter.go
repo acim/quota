@@ -63,11 +63,16 @@ func WithClock(now func() time.Time) Option {
 	})
 }
 
-// WithKeyPrefix configures the prefix used for quota counter keys.
+// WithKeyPrefix configures the prefix used for quota counter keys. The prefix
+// may contain letters, digits, '.', '_', '-', and ':', up to 128 bytes. It
+// defaults to "quota". An empty or otherwise invalid prefix returns
+// ErrInvalidRequest. Changing the prefix of a running deployment starts new
+// counters; existing counters are abandoned and expire on their own. Treat a
+// prefix change as a quota reset and avoid it during a rolling deployment.
 func WithKeyPrefix(prefix string) Option {
 	return optionFunc(func(limiter *Limiter) error {
 		if !validKeyPrefix(prefix) {
-			return fmt.Errorf("%w: key prefix is invalid", ErrInvalidRequest)
+			return fmt.Errorf("%w: key prefix %q is invalid", ErrInvalidRequest, prefix)
 		}
 		limiter.keyPrefix = prefix
 		return nil
@@ -152,7 +157,7 @@ func (r Request) validate() error {
 }
 
 func validKeyPrefix(prefix string) bool {
-	if prefix == "" {
+	if prefix == "" || len(prefix) > 128 {
 		return false
 	}
 	for _, character := range prefix {

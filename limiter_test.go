@@ -297,12 +297,16 @@ func TestLimiterKeyPrefixDefaultsAndOverrides(t *testing.T) {
 	if !strings.HasPrefix(vegaStore.lastKey, "vega:quota:v1:") {
 		t.Fatalf("key = %q", vegaStore.lastKey)
 	}
+	if strings.TrimPrefix(vegaStore.lastKey, "vega:quota") != strings.TrimPrefix(defaultStore.lastKey, "quota") {
+		t.Fatalf("prefix changed more than the key prefix: %q vs %q", vegaStore.lastKey, defaultStore.lastKey)
+	}
 }
 
 func TestLimiterKeyPrefixRejectsInvalidValues(t *testing.T) {
 	t.Parallel()
 	for name, prefix := range map[string]string{
 		"empty":                 "",
+		"too long":              strings.Repeat("a", 129),
 		"leading whitespace":    " quota",
 		"trailing whitespace":   "quota ",
 		"control character":     "quota\n",
@@ -313,6 +317,23 @@ func TestLimiterKeyPrefixRejectsInvalidValues(t *testing.T) {
 				t.Fatalf("New() error = %v, want ErrInvalidRequest", err)
 			}
 		})
+	}
+}
+
+func TestLimiterKeyPrefixAcceptsMaximumLength(t *testing.T) {
+	t.Parallel()
+	if _, err := New(NewMemoryStore(), WithKeyPrefix(strings.Repeat("a", 128))); err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+}
+
+func TestLimiterKeyPrefixErrorIncludesRejectedValue(t *testing.T) {
+	t.Parallel()
+	prefix := "quota\n"
+
+	_, err := New(NewMemoryStore(), WithKeyPrefix(prefix))
+	if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("%q", prefix)) {
+		t.Fatalf("New() error = %v, want quoted rejected prefix", err)
 	}
 }
 

@@ -4,5 +4,6 @@
 // other non-negative quantity chosen by the caller. Counters are isolated by
 // namespace and bucket and reset at UTC-aligned window boundaries. ConsumeBatch
 // atomically applies multiple independent rules when the store implements
-// BatchStore.
+// BatchStore. WithKeyPrefix gives applications sharing a store distinct,
+// operationally visible counter-key prefixes.
 package quota

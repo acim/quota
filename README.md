@@ -64,7 +64,10 @@ if err != nil {
 ```
 
 The prefix changes only the store key. `Request.Namespace` still isolates
-quota policies within the application.
+quota policies within the application. Changing the prefix of a running
+deployment starts new counters; existing counters are abandoned and expire on
+their own. Treat a prefix change as a quota reset and avoid it during a rolling
+deployment.
 
 ## Consume multiple buckets atomically
 
