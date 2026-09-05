@@ -26,7 +26,6 @@ jobs:
     needs: actionlint
     uses: ectobit/reusable-workflows/.github/workflows/go-check.yaml@main
     with:
-      golangci-lint-version: v2.13.2
       test-command: make test
 
   valkey-integration:
