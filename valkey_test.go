@@ -126,6 +126,7 @@ func TestValkeyStoreUsesExactInt64Comparisons(t *testing.T) {
 	const aboveExactFloat = int64(1 << 53)
 
 	t.Run("rejects one above limit without rounding or mutation", func(t *testing.T) {
+		t.Parallel()
 		key := uniqueValkeyKey(t, "exact-reject")
 		result, err := store.Take(ctx, key, aboveExactFloat, aboveExactFloat, time.Minute)
 		if err != nil || !result.Allowed || result.Used != aboveExactFloat {
@@ -151,6 +152,7 @@ func TestValkeyStoreUsesExactInt64Comparisons(t *testing.T) {
 	})
 
 	t.Run("accepts exact value above float precision", func(t *testing.T) {
+		t.Parallel()
 		key := uniqueValkeyKey(t, "exact-accept")
 		capacity := aboveExactFloat + 1
 		result, err := store.Take(ctx, key, aboveExactFloat, capacity, time.Minute)
@@ -164,6 +166,7 @@ func TestValkeyStoreUsesExactInt64Comparisons(t *testing.T) {
 	})
 
 	t.Run("accepts and rejects exactly near MaxInt64", func(t *testing.T) {
+		t.Parallel()
 		key := uniqueValkeyKey(t, "exact-max")
 		result, err := store.Take(ctx, key, math.MaxInt64-2, math.MaxInt64, time.Minute)
 		if err != nil || !result.Allowed || result.Used != math.MaxInt64-2 {

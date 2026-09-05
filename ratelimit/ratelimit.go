@@ -74,7 +74,7 @@ type config struct {
 func WithClock(now func() time.Time) Option {
 	return optionFunc(func(config *config) error {
 		if now == nil {
-			return fmt.Errorf("clock is required")
+			return errors.New("clock is required")
 		}
 		config.now = now
 		return nil
@@ -86,7 +86,7 @@ func WithClock(now func() time.Time) Option {
 func WithRejectionHandler(handler RejectionHandler) Option {
 	return optionFunc(func(config *config) error {
 		if handler == nil {
-			return fmt.Errorf("rejection handler is required")
+			return errors.New("rejection handler is required")
 		}
 		config.rejectionHandler = handler
 		return nil
@@ -98,7 +98,7 @@ func WithRejectionHandler(handler RejectionHandler) Option {
 func WithErrorHandler(handler ErrorHandler) Option {
 	return optionFunc(func(config *config) error {
 		if handler == nil {
-			return fmt.Errorf("error handler is required")
+			return errors.New("error handler is required")
 		}
 		config.errorHandler = handler
 		return nil
@@ -108,10 +108,10 @@ func WithErrorHandler(handler ErrorHandler) Option {
 // Middleware constructs net/http middleware backed by consumer.
 func Middleware(consumer Consumer, mapRequest RequestFunc, options ...Option) (func(http.Handler) http.Handler, error) {
 	if isNilValue(consumer) {
-		return nil, fmt.Errorf("consumer is required")
+		return nil, errors.New("consumer is required")
 	}
 	if mapRequest == nil {
-		return nil, fmt.Errorf("request function is required")
+		return nil, errors.New("request function is required")
 	}
 
 	config := config{
@@ -121,7 +121,7 @@ func Middleware(consumer Consumer, mapRequest RequestFunc, options ...Option) (f
 	}
 	for _, option := range options {
 		if option == nil {
-			return nil, fmt.Errorf("option is required")
+			return nil, errors.New("option is required")
 		}
 		if err := option.apply(&config); err != nil {
 			return nil, fmt.Errorf("apply option: %w", err)
@@ -164,10 +164,10 @@ func Middleware(consumer Consumer, mapRequest RequestFunc, options ...Option) (f
 // quota request returned by mapRequest.
 func BatchMiddleware(consumer BatchConsumer, mapRequest BatchRequestFunc, options ...Option) (func(http.Handler) http.Handler, error) {
 	if isNilValue(consumer) {
-		return nil, fmt.Errorf("batch consumer is required")
+		return nil, errors.New("batch consumer is required")
 	}
 	if mapRequest == nil {
-		return nil, fmt.Errorf("batch request function is required")
+		return nil, errors.New("batch request function is required")
 	}
 
 	config := config{
@@ -177,7 +177,7 @@ func BatchMiddleware(consumer BatchConsumer, mapRequest BatchRequestFunc, option
 	}
 	for _, option := range options {
 		if option == nil {
-			return nil, fmt.Errorf("option is required")
+			return nil, errors.New("option is required")
 		}
 		if err := option.apply(&config); err != nil {
 			return nil, fmt.Errorf("apply option: %w", err)

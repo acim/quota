@@ -1,6 +1,7 @@
 package ratelimit
 
 import (
+	"net/http"
 	"net/http/httptest"
 	"testing"
 )
@@ -45,7 +46,7 @@ func TestClientIPResolverUsesDirectPeerByDefault(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			request := httptest.NewRequest("GET", "/", nil)
+			request := httptest.NewRequest(http.MethodGet, "/", nil)
 			request.RemoteAddr = test.remoteAddr
 			request.Header.Set("X-Forwarded-For", test.forwarded)
 			got, err := resolver.Resolve(request)
@@ -119,7 +120,7 @@ func TestClientIPResolverTrustsForwardingChainOnlyFromConfiguredPeer(t *testing.
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			request := httptest.NewRequest("GET", "/", nil)
+			request := httptest.NewRequest(http.MethodGet, "/", nil)
 			request.RemoteAddr = test.remoteAddr
 			request.Header["X-Forwarded-For"] = test.forwarded
 			got, err := resolver.Resolve(request)
@@ -135,7 +136,7 @@ func TestClientIPResolverTrustsForwardingChainOnlyFromConfiguredPeer(t *testing.
 
 func TestClientIPResolverRejectsInvalidInputs(t *testing.T) {
 	t.Parallel()
-	request := httptest.NewRequest("GET", "/", nil)
+	request := httptest.NewRequest(http.MethodGet, "/", nil)
 	request.RemoteAddr = "invalid address"
 	resolver, err := NewClientIPResolver()
 	if err != nil {
@@ -148,7 +149,7 @@ func TestClientIPResolverRejectsInvalidInputs(t *testing.T) {
 		t.Fatal("Resolve(nil request) error = nil, want non-nil")
 	}
 	var nilResolver *ClientIPResolver
-	if _, err := nilResolver.Resolve(httptest.NewRequest("GET", "/", nil)); err == nil {
+	if _, err := nilResolver.Resolve(httptest.NewRequest(http.MethodGet, "/", nil)); err == nil {
 		t.Fatal("nil resolver Resolve() error = nil, want non-nil")
 	}
 }

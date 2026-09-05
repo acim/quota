@@ -1,6 +1,7 @@
 package ratelimit
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -38,10 +39,10 @@ func NewClientIPResolver(trustedProxyCIDRs ...string) (*ClientIPResolver, error)
 // address. A malformed or fully trusted chain safely falls back to the peer.
 func (resolver *ClientIPResolver) Resolve(request *http.Request) (netip.Addr, error) {
 	if resolver == nil {
-		return netip.Addr{}, fmt.Errorf("client IP resolver is required")
+		return netip.Addr{}, errors.New("client IP resolver is required")
 	}
 	if request == nil {
-		return netip.Addr{}, fmt.Errorf("HTTP request is required")
+		return netip.Addr{}, errors.New("HTTP request is required")
 	}
 
 	peer, err := parseRemoteAddr(request.RemoteAddr)

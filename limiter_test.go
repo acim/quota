@@ -122,6 +122,7 @@ func TestLimiterConsumeBatchPropagatesStoreErrorsAndInvalidResults(t *testing.T)
 		"invalid result": {batchCounter: BatchCounter{Allowed: true}},
 	} {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			limiter, err := New(store)
 			if err != nil {
 				t.Fatalf("New() error = %v", err)
@@ -313,6 +314,7 @@ func TestLimiterKeyPrefixRejectsInvalidValues(t *testing.T) {
 		"unsupported character": "quota/slash",
 	} {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			if _, err := New(NewMemoryStore(), WithKeyPrefix(prefix)); !errors.Is(err, ErrInvalidRequest) {
 				t.Fatalf("New() error = %v, want ErrInvalidRequest", err)
 			}
@@ -373,6 +375,7 @@ func TestLimiterRejectsInvalidOptions(t *testing.T) {
 		"nil option": nil,
 	} {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			if _, err := New(NewMemoryStore(), option); !errors.Is(err, ErrInvalidRequest) {
 				t.Fatalf("New() error = %v, want ErrInvalidRequest", err)
 			}
@@ -453,6 +456,7 @@ func TestLimiterValidatesRequests(t *testing.T) {
 	limiter := newTestLimiter(t)
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			request := valid
 			test.mutate(&request)
 			if _, err := limiter.Consume(context.Background(), request); !errors.Is(err, ErrInvalidRequest) {
@@ -460,6 +464,10 @@ func TestLimiterValidatesRequests(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestLimiterRejectsNilStore(t *testing.T) {
+	t.Parallel()
 	if _, err := New(nil); !errors.Is(err, ErrInvalidRequest) {
 		t.Fatalf("New(nil) error = %v", err)
 	}
