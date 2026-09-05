@@ -36,7 +36,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       valkey:
-        image: valkey/valkey:9.1.1-alpine
+        image: valkey/valkey:9.1.2-alpine
         ports:
           - 6379:6379
         options: >-

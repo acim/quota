@@ -464,6 +464,10 @@ func TestLimiterValidatesRequests(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestLimiterRejectsNilStore(t *testing.T) {
+	t.Parallel()
 	if _, err := New(nil); !errors.Is(err, ErrInvalidRequest) {
 		t.Fatalf("New(nil) error = %v", err)
 	}
