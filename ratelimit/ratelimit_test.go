@@ -54,11 +54,15 @@ func TestMiddlewareAllowsRequestAndForwardsContextAndMappedRequest(t *testing.T)
 		Amount:    2,
 		Rule:      quota.Rule{Capacity: 10, Window: time.Minute},
 	}
-	var gotContext context.Context
+	var gotContextMatches bool
+	var gotContextValue any
 	var gotRequest quota.Request
-	consumer := consumerFunc(func(ctx context.Context, request quota.Request) (quota.Decision, error) {
-		gotContext = ctx
-		gotRequest = request
+	request := httptest.NewRequest(http.MethodPost, "/chats", nil)
+	request = request.WithContext(context.WithValue(request.Context(), key, "abc123"))
+	consumer := consumerFunc(func(ctx context.Context, quotaRequest quota.Request) (quota.Decision, error) {
+		gotContextMatches = ctx == request.Context()
+		gotContextValue = ctx.Value(key)
+		gotRequest = quotaRequest
 		return quota.Decision{Allowed: true}, nil
 	})
 	middleware, err := Middleware(consumer, func(*http.Request) (quota.Request, error) {
@@ -72,14 +76,12 @@ func TestMiddlewareAllowsRequestAndForwardsContextAndMappedRequest(t *testing.T)
 	handler := middleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		called++
 	}))
-	request := httptest.NewRequest(http.MethodPost, "/chats", nil)
-	request = request.WithContext(context.WithValue(request.Context(), key, "abc123"))
 	handler.ServeHTTP(httptest.NewRecorder(), request)
 
 	if called != 1 {
 		t.Fatalf("downstream calls = %d, want 1", called)
 	}
-	if gotContext != request.Context() || gotContext.Value(key) != "abc123" {
+	if !gotContextMatches || gotContextValue != "abc123" {
 		t.Fatal("Consume() did not receive the incoming request context")
 	}
 	if !reflect.DeepEqual(gotRequest, wantRequest) {
@@ -394,10 +396,14 @@ func TestBatchMiddlewareAllowsRequestAndForwardsContextAndMappedRequests(t *test
 		{Namespace: "example:http:forms", Bucket: "client-42", Amount: 1, Rule: quota.Rule{Capacity: 5, Window: time.Minute}},
 		{Namespace: "example:http:forms", Bucket: "client-42", Amount: 1, Rule: quota.Rule{Capacity: 30, Window: time.Hour}},
 	}
-	var gotContext context.Context
+	var gotContextMatches bool
+	var gotContextValue any
 	var gotRequests []quota.Request
+	request := httptest.NewRequest(http.MethodPost, "/forms", nil)
+	request = request.WithContext(context.WithValue(request.Context(), key, "abc123"))
 	consumer := batchConsumerFunc(func(ctx context.Context, requests []quota.Request) (quota.BatchDecision, error) {
-		gotContext = ctx
+		gotContextMatches = ctx == request.Context()
+		gotContextValue = ctx.Value(key)
 		gotRequests = requests
 		return quota.BatchDecision{Allowed: true}, nil
 	})
@@ -410,14 +416,12 @@ func TestBatchMiddlewareAllowsRequestAndForwardsContextAndMappedRequests(t *test
 
 	called := 0
 	handler := middleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called++ }))
-	request := httptest.NewRequest(http.MethodPost, "/forms", nil)
-	request = request.WithContext(context.WithValue(request.Context(), key, "abc123"))
 	handler.ServeHTTP(httptest.NewRecorder(), request)
 
 	if called != 1 {
 		t.Fatalf("downstream calls = %d, want 1", called)
 	}
-	if gotContext != request.Context() || gotContext.Value(key) != "abc123" {
+	if !gotContextMatches || gotContextValue != "abc123" {
 		t.Fatal("ConsumeBatch() did not receive the incoming request context")
 	}
 	if !reflect.DeepEqual(gotRequests, wantRequests) {

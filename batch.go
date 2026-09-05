@@ -100,7 +100,7 @@ func (l *Limiter) ConsumeBatch(ctx context.Context, requests []Request) (BatchDe
 		return BatchDecision{}, fmt.Errorf("take quota batch: %w", err)
 	}
 	if len(counter.Used) != len(requests) {
-		return BatchDecision{}, fmt.Errorf("take quota batch: invalid counter result")
+		return BatchDecision{}, errors.New("take quota batch: invalid counter result")
 	}
 
 	decisions := make([]Decision, len(requests))
