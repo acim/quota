@@ -14,3 +14,6 @@ Standard Go jobs select the latest stable release and patch. Direct
 shared workflows own their Go selection without consumer overrides. The
 `go.mod` directive remains the minimum Go and language-semantics contract,
 not the standard CI toolchain selector. Preserve module files for cache keys.
+
+Before pushing Go changes, run `make check` from the repository root plus the
+tests affected by the change.

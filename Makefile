@@ -29,7 +29,10 @@ coverage:
 		printf "coverage %.1f%% meets required %.1f%%\n", coverage, threshold; \
 	}'
 
-check: lint test
+# Mirrors the static gates of ectobit/reusable-workflows go-check.yaml in the
+# same order; update both together. Run before every push, with the affected
+# tests. Tests are separate because CI runs them in its own job.
+check: lint
 	@govulncheck ./...
 	@go fix -diff ./...
 
